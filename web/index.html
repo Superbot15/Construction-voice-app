@@ -42,6 +42,25 @@
         let audioStream = null;
         let recording = false;
 
+        // iOS Safari (and Chrome on iOS, which is required to use the same engine) only
+        // allows speechSynthesis.speak() to actually produce sound when it's called
+        // synchronously inside a user-gesture handler. Our real answer is spoken after an
+        // async recording + upload + fetch round trip, by which point iOS no longer treats
+        // it as "in response to" the tap and silently drops it. Priming the engine with a
+        // silent utterance synchronously on every tap unlocks it for the rest of that turn.
+        function unlockSpeech() {
+            if (!window.speechSynthesis) return;
+            const unlock = new SpeechSynthesisUtterance(' ');
+            unlock.volume = 0;
+            window.speechSynthesis.speak(unlock);
+        }
+
+        function speak(text) {
+            if (!window.speechSynthesis) return;
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        }
+
         function pickMimeType() {
             const candidates = [
                 'audio/webm;codecs=opus',
@@ -149,14 +168,14 @@
                 const data = await response.json();
                 output.innerHTML = `<strong>You asked:</strong> "${data.transcript}"<br><br><strong>Answer:</strong> ${data.reply}`;
 
-                const utterance = new SpeechSynthesisUtterance(data.reply);
-                window.speechSynthesis.speak(utterance);
+                speak(data.reply);
             } catch (error) {
                 output.innerHTML = 'Connection failed. Check your internet connection and try again.';
             }
         }
 
         micBtn.onclick = () => {
+            unlockSpeech();
             if (recording) {
                 stopRecording();
             } else {
