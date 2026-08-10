@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
+
+# Source PDFs are only needed for local ingestion, not at runtime.
+# Keep them out of the repo (rebuild chroma_db locally when you add new specs).
+Document_Source/
