@@ -42,24 +42,57 @@
         let audioStream = null;
         let recording = false;
 
-        // iOS Safari (and Chrome on iOS, which is required to use the same engine) only
-        // allows speechSynthesis.speak() to actually produce sound when it's called
-        // synchronously inside a user-gesture handler. Our real answer is spoken after an
-        // async recording + upload + fetch round trip, by which point iOS no longer treats
-        // it as "in response to" the tap and silently drops it. Priming the engine with a
-        // silent utterance synchronously on every tap unlocks it for the rest of that turn.
-        function unlockSpeech() {
-            if (!window.speechSynthesis) return;
-            const unlock = new SpeechSynthesisUtterance(' ');
-            unlock.volume = 0;
-            window.speechSynthesis.speak(unlock);
+        // The server generates natural speech (Gemini TTS) for the primary voice.
+        // speechSynthesis is kept only as a fallback if that ever fails to load.
+        // A tiny silent WAV, used purely to unlock <audio> playback (see below).
+        const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+        const audioPlayer = new Audio();
+
+        // iOS (Safari and Chrome, which share WebKit there) only allows audio playback
+        // to start from an async call if playback was already "unlocked" by a real
+        // play() call made synchronously inside a user-gesture handler earlier in the
+        // same session. Our real audio arrives after an async record -> upload -> fetch
+        // round trip, so we prime both the <audio> element and speechSynthesis (fallback)
+        // with a silent/empty utterance synchronously on every mic tap.
+        function unlockAudio() {
+            audioPlayer.src = SILENT_WAV;
+            audioPlayer.play().catch(() => {});
+
+            if (window.speechSynthesis) {
+                const unlock = new SpeechSynthesisUtterance(' ');
+                unlock.volume = 0;
+                window.speechSynthesis.speak(unlock);
+            }
         }
 
-        function speak(text) {
+        function speakFallback(text) {
             if (!window.speechSynthesis) return;
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
         }
+
+        function playReply(audioBase64, text) {
+            if (!audioBase64) {
+                speakFallback(text);
+                return;
+            }
+            try {
+                const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
+                const blob = new Blob([bytes], { type: 'audio/wav' });
+                audioPlayer.src = URL.createObjectURL(blob);
+                audioPlayer.play().catch(() => speakFallback(text));
+            } catch (err) {
+                speakFallback(text);
+            }
+        }
+
+        // Free hosting spins the server down after periods of inactivity, so with
+        // multi-day gaps between uses the first request can take up to a minute to wake
+        // it up. Ping a lightweight endpoint as soon as the page loads to start that
+        // wake-up in the background before the user even taps the mic, and track it so
+        // we can set honest expectations if they ask a question before it's finished.
+        let serverWarm = false;
+        fetch('/api/health').then(() => { serverWarm = true; }).catch(() => {});
 
         function pickMimeType() {
             const candidates = [
@@ -128,7 +161,9 @@
 
             const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
             micBtn.disabled = true;
-            statusEl.textContent = 'Processing your question...';
+            statusEl.textContent = serverWarm
+                ? 'Processing your question...'
+                : 'Waking up the server (first request in a while can take up to a minute)...';
             output.innerHTML = '<em>Thinking...</em>';
 
             await sendAudio(blob);
@@ -166,16 +201,17 @@
                 }
 
                 const data = await response.json();
+                serverWarm = true;
                 output.innerHTML = `<strong>You asked:</strong> "${data.transcript}"<br><br><strong>Answer:</strong> ${data.reply}`;
 
-                speak(data.reply);
+                playReply(data.audio_base64, data.reply);
             } catch (error) {
                 output.innerHTML = 'Connection failed. Check your internet connection and try again.';
             }
         }
 
         micBtn.onclick = () => {
-            unlockSpeech();
+            unlockAudio();
             if (recording) {
                 stopRecording();
             } else {
