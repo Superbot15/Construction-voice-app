@@ -1,17 +1,22 @@
 import base64
 import io
+import json
 import os
+import re
 import wave
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+SENTENCE_END_RE = re.compile(r"[.!?]+(?:\s+|$)")
 
 load_dotenv()
 
@@ -119,12 +124,38 @@ async def ask(audio: UploadFile = File(...), x_access_code: Optional[str] = Head
     Question: {transcript}
     """
 
-    answer_response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    reply = (answer_response.text or "").strip()
+    def event_stream():
+        # Stream the answer sentence-by-sentence and synthesize + emit each sentence's
+        # audio as soon as it's complete, instead of waiting for the entire answer to be
+        # written and the entire reply synthesized before any sound can play. This is
+        # what actually moves the needle on perceived latency, since answers are only
+        # ever 1-3 sentences but each Gemini round trip still takes real time.
+        yield json.dumps({"type": "transcript", "text": transcript}) + "\n"
 
-    audio_base64 = synthesize_speech_wav_base64(reply)
+        buffer = ""
+        try:
+            for chunk in client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt):
+                buffer += chunk.text or ""
+                while True:
+                    match = SENTENCE_END_RE.search(buffer)
+                    if not match:
+                        break
+                    sentence = buffer[: match.end()].strip()
+                    buffer = buffer[match.end() :]
+                    if sentence:
+                        audio_b64 = synthesize_speech_wav_base64(sentence)
+                        yield json.dumps({"type": "sentence", "text": sentence, "audio_base64": audio_b64}) + "\n"
 
-    return {"transcript": transcript, "reply": reply, "audio_base64": audio_base64}
+            leftover = buffer.strip()
+            if leftover:
+                audio_b64 = synthesize_speech_wav_base64(leftover)
+                yield json.dumps({"type": "sentence", "text": leftover, "audio_base64": audio_b64}) + "\n"
+
+            yield json.dumps({"type": "done"}) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "detail": str(e)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

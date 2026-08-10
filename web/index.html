@@ -65,24 +65,58 @@
             }
         }
 
-        function speakFallback(text) {
-            if (!window.speechSynthesis) return;
-            window.speechSynthesis.cancel();
-            window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        function speakFallback(text, onEnd) {
+            if (!window.speechSynthesis) {
+                if (onEnd) onEnd();
+                return;
+            }
+            const utterance = new SpeechSynthesisUtterance(text);
+            if (onEnd) {
+                utterance.onend = onEnd;
+                utterance.onerror = onEnd;
+            }
+            window.speechSynthesis.speak(utterance);
         }
 
-        function playReply(audioBase64, text) {
+        // The backend streams the answer sentence-by-sentence so playback can start on
+        // the first sentence while later ones are still being generated/synthesized,
+        // instead of waiting for the whole answer. Queue clips and play them in order.
+        const audioQueue = [];
+        let audioPlaying = false;
+
+        function resetPlayback() {
+            audioQueue.length = 0;
+            audioPlaying = false;
+            audioPlayer.pause();
+            if (window.speechSynthesis) window.speechSynthesis.cancel();
+        }
+
+        function enqueueSentence(audioBase64, text) {
+            audioQueue.push({ audioBase64, text });
+            if (!audioPlaying) playNextInQueue();
+        }
+
+        function playNextInQueue() {
+            if (audioQueue.length === 0) {
+                audioPlaying = false;
+                return;
+            }
+            audioPlaying = true;
+            const { audioBase64, text } = audioQueue.shift();
+
             if (!audioBase64) {
-                speakFallback(text);
+                speakFallback(text, playNextInQueue);
                 return;
             }
             try {
                 const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
                 const blob = new Blob([bytes], { type: 'audio/wav' });
                 audioPlayer.src = URL.createObjectURL(blob);
-                audioPlayer.play().catch(() => speakFallback(text));
+                audioPlayer.onended = playNextInQueue;
+                audioPlayer.onerror = () => speakFallback(text, playNextInQueue);
+                audioPlayer.play().catch(() => speakFallback(text, playNextInQueue));
             } catch (err) {
-                speakFallback(text);
+                speakFallback(text, playNextInQueue);
             }
         }
 
@@ -160,6 +194,7 @@
             }
 
             const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+            resetPlayback();
             micBtn.disabled = true;
             statusEl.textContent = serverWarm
                 ? 'Processing your question...'
@@ -200,11 +235,35 @@
                     return;
                 }
 
-                const data = await response.json();
                 serverWarm = true;
-                output.innerHTML = `<strong>You asked:</strong> "${data.transcript}"<br><br><strong>Answer:</strong> ${data.reply}`;
+                output.innerHTML = '<strong>Answer:</strong> ';
 
-                playReply(data.audio_base64, data.reply);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+                        const line = buffer.slice(0, newlineIndex).trim();
+                        buffer = buffer.slice(newlineIndex + 1);
+                        if (!line) continue;
+
+                        const event = JSON.parse(line);
+                        if (event.type === 'transcript') {
+                            output.innerHTML = `<strong>You asked:</strong> "${event.text}"<br><br><strong>Answer:</strong> `;
+                        } else if (event.type === 'sentence') {
+                            output.innerHTML += event.text + ' ';
+                            enqueueSentence(event.audio_base64, event.text);
+                        } else if (event.type === 'error') {
+                            output.innerHTML += `<br><em>${event.detail || 'Something went wrong generating the answer.'}</em>`;
+                        }
+                    }
+                }
             } catch (error) {
                 output.innerHTML = 'Connection failed. Check your internet connection and try again.';
             }
