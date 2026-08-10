@@ -14,9 +14,10 @@ SOURCE_DIR = "Document_Source"
 PERSIST_DIR = "chroma_db"
 MANIFEST_PATH = os.path.join(PERSIST_DIR, "ingested_files.json")
 BATCH_SIZE = 50
-# The free-tier Gemini embedding quota is ~100 requests/minute and the API issues
-# roughly one request per chunk, so pace batches to stay under that instead of
-# racing ahead and getting 429'd.
+# The free-tier Gemini embedding quota is flaky in practice (observed stalling well
+# below the documented per-minute number), so pace conservatively and checkpoint
+# after every batch so an interrupted run can resume later without re-embedding
+# (and re-paying for) chunks that already succeeded.
 PACE_DELAY_SECONDS = 30
 MAX_RATE_LIMIT_RETRIES = 10
 RATE_LIMIT_RETRY_DELAY_SECONDS = 60
@@ -32,12 +33,16 @@ def add_batch_with_retry(db, batch):
             if "RESOURCE_EXHAUSTED" in message or "429" in message:
                 print(
                     f"  Rate limited, waiting {RATE_LIMIT_RETRY_DELAY_SECONDS}s "
-                    f"before retry ({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+                    f"before retry ({attempt}/{MAX_RATE_LIMIT_RETRIES})...",
+                    flush=True,
                 )
                 time.sleep(RATE_LIMIT_RETRY_DELAY_SECONDS)
                 continue
             raise
-    raise RuntimeError("Gave up on a batch after repeated rate-limit errors")
+    raise RuntimeError(
+        "Gave up on a batch after repeated rate-limit errors. This run's progress is "
+        "saved - rerun ingest.py later (e.g. after the quota resets) to resume from here."
+    )
 
 
 def load_manifest():
@@ -65,41 +70,54 @@ def main():
 
     manifest = load_manifest()
     pdf_files = sorted(f for f in os.listdir(SOURCE_DIR) if f.lower().endswith(".pdf"))
-    new_files = [f for f in pdf_files if f not in manifest]
+    pending_files = [f for f in pdf_files if not manifest.get(f, {}).get("complete")]
 
-    if not new_files:
-        print("Nothing to do - every PDF in Document_Source has already been ingested.")
-        print(f"Already ingested: {', '.join(pdf_files) if pdf_files else '(none found)'}")
+    if not pending_files:
+        print("Nothing to do - every PDF in Document_Source has already been ingested.", flush=True)
+        print(f"Already ingested: {', '.join(pdf_files) if pdf_files else '(none found)'}", flush=True)
         return
 
-    print(f"Found {len(new_files)} new file(s) to ingest: {', '.join(new_files)}")
+    print(f"Found {len(pending_files)} file(s) needing (more) ingestion: {', '.join(pending_files)}", flush=True)
 
     embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=google_api_key)
     db = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
-    for filename in new_files:
+    for filename in pending_files:
         path = os.path.join(SOURCE_DIR, filename)
-        print(f"Loading {filename}...")
+        entry = manifest.get(filename, {})
+        chunks_done = entry.get("chunks_done", 0)
+
+        print(f"Loading {filename}...", flush=True)
         pages = PyPDFLoader(path).load()
         chunks = text_splitter.split_documents(pages)
-        print(f"  {len(pages)} pages -> {len(chunks)} chunks")
+        print(f"  {len(pages)} pages -> {len(chunks)} chunks", flush=True)
 
-        # Small batches so a rate-limit hiccup partway through doesn't lose earlier progress
-        for i in range(0, len(chunks), BATCH_SIZE):
+        if chunks_done:
+            print(f"  Resuming from chunk {chunks_done} (already indexed in an earlier run)", flush=True)
+
+        for i in range(chunks_done, len(chunks), BATCH_SIZE):
             batch = chunks[i:i + BATCH_SIZE]
             add_batch_with_retry(db, batch)
-            print(f"  Indexed chunks {i} to {min(i + BATCH_SIZE, len(chunks))} of {len(chunks)}")
-            if i + BATCH_SIZE < len(chunks):
+            chunks_done = min(i + BATCH_SIZE, len(chunks))
+            print(f"  Indexed chunks {i} to {chunks_done} of {len(chunks)}", flush=True)
+
+            # Checkpoint after every batch, not just at file end, so a rate-limit
+            # failure loses at most one batch of progress instead of the whole file.
+            manifest[filename] = {
+                "pages": len(pages),
+                "total_chunks": len(chunks),
+                "chunks_done": chunks_done,
+                "complete": chunks_done >= len(chunks),
+            }
+            save_manifest(manifest)
+
+            if chunks_done < len(chunks):
                 time.sleep(PACE_DELAY_SECONDS)
 
-        # Mark this file done only after all its chunks are indexed, so a crash mid-file
-        # re-ingests that file next run instead of silently skipping the rest of it
-        manifest[filename] = {"pages": len(pages), "chunks": len(chunks)}
-        save_manifest(manifest)
-        print(f"Done with {filename}, progress saved.")
+        print(f"Done with {filename}.", flush=True)
 
-    print("All new files ingested successfully.")
+    print("All pending files ingested successfully.", flush=True)
 
 
 if __name__ == "__main__":
