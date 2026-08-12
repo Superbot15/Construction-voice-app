@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import time
 import wave
 from typing import Optional
 
@@ -12,11 +13,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 SENTENCE_END_RE = re.compile(r"[.!?]+(?:\s+|$)")
+TRANSIENT_RETRY_ATTEMPTS = 3
+TRANSIENT_RETRY_DELAY_SECONDS = 2
+
+
+def is_transient_error(e):
+    # Google's models occasionally return a fast 503 "high demand, try again" that
+    # usually clears within seconds - worth a couple of quick retries instead of
+    # failing the whole request over what's typically a momentary blip.
+    if isinstance(e, genai_errors.ServerError):
+        return True
+    message = str(e)
+    return "UNAVAILABLE" in message or "RESOURCE_EXHAUSTED" in message
+
+
+def call_with_retries(fn):
+    last_error = None
+    for attempt in range(TRANSIENT_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as e:
+            last_error = e
+            if not is_transient_error(e) or attempt == TRANSIENT_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(TRANSIENT_RETRY_DELAY_SECONDS)
+    raise last_error
 
 load_dotenv()
 
@@ -55,7 +82,7 @@ def synthesize_speech_wav_base64(text):
     of breaking the whole answer over what's a nice-to-have.
     """
     try:
-        tts_response = client.models.generate_content(
+        tts_response = call_with_retries(lambda: client.models.generate_content(
             model=TTS_MODEL,
             contents=text,
             config=types.GenerateContentConfig(
@@ -66,7 +93,7 @@ def synthesize_speech_wav_base64(text):
                     )
                 ),
             ),
-        )
+        ))
         part = tts_response.candidates[0].content.parts[0]
         pcm_bytes = part.inline_data.data
 
@@ -99,19 +126,28 @@ async def ask(audio: UploadFile = File(...), x_access_code: Optional[str] = Head
     audio_bytes = await audio.read()
     mime_type = audio.content_type or "audio/webm"
 
-    transcript_response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
-            "Transcribe the spoken words in this audio clip exactly. Reply with only the transcript text, nothing else.",
-        ],
-    )
-    transcript = (transcript_response.text or "").strip()
+    try:
+        transcript_response = call_with_retries(lambda: client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                "Transcribe the spoken words in this audio clip exactly. Reply with only the transcript text, nothing else.",
+            ],
+        ))
+        transcript = (transcript_response.text or "").strip()
 
-    if not transcript:
-        raise HTTPException(status_code=422, detail="Could not understand audio, please try again")
+        if not transcript:
+            raise HTTPException(status_code=422, detail="Could not understand audio, please try again")
 
-    search_results = db.similarity_search(transcript, k=3)
+        search_results = call_with_retries(lambda: db.similarity_search(transcript, k=3))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Google's AI service is temporarily overloaded. Please wait a moment and try again.",
+        )
+
     context_text = "\n\n".join(doc.page_content for doc in search_results)
 
     prompt = f"""
@@ -134,7 +170,10 @@ async def ask(audio: UploadFile = File(...), x_access_code: Optional[str] = Head
 
         buffer = ""
         try:
-            for chunk in client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt):
+            stream = call_with_retries(
+                lambda: client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
+            )
+            for chunk in stream:
                 buffer += chunk.text or ""
                 while True:
                     match = SENTENCE_END_RE.search(buffer)
@@ -153,7 +192,12 @@ async def ask(audio: UploadFile = File(...), x_access_code: Optional[str] = Head
 
             yield json.dumps({"type": "done"}) + "\n"
         except Exception as e:
-            yield json.dumps({"type": "error", "detail": str(e)}) + "\n"
+            detail = (
+                "Google's AI service is temporarily overloaded. Please wait a moment and try again."
+                if is_transient_error(e)
+                else "Something went wrong generating the answer. Please try again."
+            )
+            yield json.dumps({"type": "error", "detail": detail}) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
