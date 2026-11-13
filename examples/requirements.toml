@@ -1,0 +1,48 @@
+# Example requirements for a Class A structural concrete spec section.
+# Values are illustrative; take real limits from your project specifications.
+
+[[requirement]]
+id = "03 30 00-2.2.A"
+applies_to = "product_data"
+property = "compressive_strength_28_day"
+min = 4000
+unit = "psi"
+description = "Minimum 28-day compressive strength"
+
+[[requirement]]
+id = "03 30 00-2.1.C"
+applies_to = "product_data"
+property = ""
+standard = "ASTM C494"
+description = "Chemical admixtures per ASTM C494"
+
+[[requirement]]
+id = "03 30 00-3.4.B slump"
+applies_to = "field_test"
+property = "slump"
+min = 2
+max = 5
+unit = "in"
+
+[[requirement]]
+id = "03 30 00-3.4.B air"
+applies_to = "field_test"
+property = "air_content"
+min = 5.0
+max = 8.0
+unit = "%"
+
+[[requirement]]
+id = "03 30 00-3.5 temp"
+applies_to = "field_test"
+property = "concrete_temperature"
+min = 50
+max = 90
+unit = "F"
+
+[[requirement]]
+id = "31 23 23-3.3 compaction"
+applies_to = "field_test"
+property = "compaction"
+min = 95
+unit = "%"

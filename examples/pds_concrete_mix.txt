@@ -1,0 +1,14 @@
+PRODUCT DATA SHEET
+Product Name: StructuraMix 4500 Ready-Mix Concrete
+Manufacturer: Example Aggregates & Ready Mix Co.
+
+Conforms to ASTM C94 and ASTM C150 Type I/II cement. Admixtures per ASTM C494.
+
+TYPICAL PROPERTIES
+Compressive Strength (28 day) ........ 4,500 psi min
+Compressive Strength (7 day) ......... 3,200 psi
+Slump ................................ 4 in
+Air Content .......................... 6.0 %
+Unit Weight .......................... 145 pcf
+Water-Cement Ratio ................... 0.45
+Maximum Aggregate Size ............... 19 mm

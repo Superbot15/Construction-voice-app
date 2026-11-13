@@ -1,0 +1,12 @@
+INSPECTOR DAILY REPORT
+Date: 2026-10-14
+Inspector: J. Doe
+Weather: Overcast, light wind
+Ambient Temp: 58 F
+
+Concrete placement, Pier 3 footing.
+Truck 1 - Slump: 4.5 in, Air Content: 5.8 %, Concrete Temp: 68 F @ Pier 3
+Truck 2 - Slump: 7.25 in, Air Content: 4.1 %, Concrete Temp: 71 F @ Pier 3
+Embankment lift 6 - Compaction: 93 % at Sta 12+50
+- Cylinders cast (set of 4) for each truck.
+- Contractor notified of high slump on Truck 2.

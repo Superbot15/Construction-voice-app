@@ -1,0 +1,8 @@
+SUBMITTAL TRANSMITTAL
+Submittal No: 03 30 00-004
+Revision: 1
+Spec Section: 03 30 00 Cast-in-Place Concrete
+Title: Concrete Mix Design - Bridge Deck, Class A
+Contractor: Example Heavy Civil LLC
+Date: 2026-10-02
+Status: Approved as Noted
